@@ -167,6 +167,165 @@ def sam_unmapped_to_fastq(pao1_sam, output_fastq, gzip_output=True):
     return {"pao1_sam_records": total, "pao1_mapped_reads": mapped, "pao1_unmapped_reads": unmapped, "leftover_fastq_reads": written, "pao1_unmapped_missing_seq_or_qual": skipped}
 
 
+
+def resolve_reference_file(reference_dir, filename):
+    path = Path(filename).expanduser()
+    return path if path.is_absolute() else Path(reference_dir).expanduser() / filename
+
+
+def bowtie2_index_exists(index_prefix):
+    index_prefix = str(index_prefix)
+    small = [".1.bt2", ".2.bt2", ".3.bt2", ".4.bt2", ".rev.1.bt2", ".rev.2.bt2"]
+    large = [".1.bt2l", ".2.bt2l", ".3.bt2l", ".4.bt2l", ".rev.1.bt2l", ".rev.2.bt2l"]
+    return all(Path(index_prefix + s).exists() for s in small) or all(Path(index_prefix + s).exists() for s in large)
+
+
+def build_bowtie2_index_if_needed(fasta, index_prefix, threads):
+    if bowtie2_index_exists(index_prefix):
+        print(f"Bowtie2 index exists: {index_prefix}")
+        return
+    run(["bowtie2-build", "--threads", str(threads), str(fasta), str(index_prefix)])
+
+
+def map_fastq_to_reference(fastq, index_prefix, sam_out, log_out, threads, mode, extra_args, overwrite=False):
+    if Path(sam_out).exists() and not overwrite:
+        return sam_out
+    cmd = ["bowtie2", mode, "-p", str(threads), "-x", str(index_prefix), "-q", "-U", str(fastq), "-S", str(sam_out)]
+    if extra_args:
+        cmd[1:1] = list(extra_args)
+    run(cmd, stderr_path=log_out)
+    return sam_out
+
+
+def run_featurecounts_reference(sam_file, gff, out_txt, log_out, threads, stranded, feature_type, gene_attribute, allow_multi_overlap, overwrite=False):
+    if Path(out_txt).exists() and not overwrite:
+        return
+    cmd = ["featureCounts", "-T", str(threads), "-a", str(gff), "-s", str(stranded), "-t", str(feature_type), "-g", str(gene_attribute), "-o", str(out_txt), str(sam_file)]
+    if allow_multi_overlap:
+        cmd.insert(1, "-O")
+    run(cmd, stderr_path=log_out)
+
+
+def parse_gene_mapping_counts(featurecounts_txt, sample, reference_name, total_input_reads):
+    df = pd.read_csv(featurecounts_txt, sep="\t", comment="#")
+    annotation_cols = ["Geneid", "Chr", "Start", "End", "Strand", "Length"]
+    count_cols = [c for c in df.columns if c not in annotation_cols]
+    if len(count_cols) != 1:
+        raise ValueError(f"Expected one count column in {featurecounts_txt}, found: {count_cols}")
+    df = df.rename(columns={"Geneid": "gene", count_cols[0]: "mapped_reads"})
+    total_gene_counts = int(df["mapped_reads"].sum())
+    df.insert(0, "reference", reference_name)
+    df.insert(0, "sample", sample)
+    df["total_input_reads"] = total_input_reads
+    df["total_gene_assigned_counts"] = total_gene_counts
+    df["percent_of_input_reads"] = (df["mapped_reads"] / total_input_reads) * 100 if total_input_reads > 0 else 0.0
+    df["percent_of_gene_assigned_counts"] = (df["mapped_reads"] / total_gene_counts) * 100 if total_gene_counts > 0 else 0.0
+    return df.sort_values("mapped_reads", ascending=False)
+
+
+def parse_featurecounts_summary(summary_file, sample, reference_name, total_input_reads):
+    if not Path(summary_file).exists():
+        return pd.DataFrame()
+    df = pd.read_csv(summary_file, sep="\t")
+    count_col = df.columns[-1]
+    df = df.rename(columns={"Status": "status", count_col: "read_count"})
+    df.insert(0, "reference", reference_name)
+    df.insert(0, "sample", sample)
+    df["total_input_reads"] = total_input_reads
+    df["percent_of_input_reads"] = (df["read_count"] / total_input_reads) * 100 if total_input_reads > 0 else 0.0
+    return df
+
+
+def run_reference_gene_mapping(sample, input_fastq, config, sample_dir, overwrite):
+    gene_cfg = config.get("gene_mapping", {})
+    if not gene_cfg.get("enabled", False):
+        return input_fastq, {}, [], []
+    references = gene_cfg.get("references", [])
+    if not references:
+        return input_fastq, {}, [], []
+
+    bowtie_cfg = gene_cfg.get("bowtie2", {})
+    fc_cfg = gene_cfg.get("featurecounts", {})
+    settings = gene_cfg.get("settings", {})
+    threads = int(bowtie_cfg.get("threads", config.get("settings", {}).get("threads", 16)))
+    fc_threads = int(fc_cfg.get("threads", threads))
+    mode = bowtie_cfg.get("mode", "--end-to-end")
+    extra_args = bowtie_cfg.get("extra_args", [])
+    stranded = fc_cfg.get("stranded", 0)
+    allow_multi_overlap = fc_cfg.get("allow_multi_overlap", False)
+    keep_sam = settings.get("keep_sam", True)
+    gzip_output = settings.get("gzip_output", config.get("settings", {}).get("gzip_output", True))
+
+    mapping_dir = sample_dir / "reference_gene_mapping"
+    mapping_dir.mkdir(parents=True, exist_ok=True)
+    current_fastq = Path(input_fastq)
+    stats = {}
+    sankey_steps = []
+    manifest_rows = []
+    all_gene_dfs = []
+    all_summary_dfs = []
+
+    for ref in references:
+        ref_name = ref["name"]
+        ref_dir = Path(ref["reference_dir"]).expanduser()
+        fasta = resolve_reference_file(ref_dir, ref["fasta"])
+        gff = resolve_reference_file(ref_dir, ref["gff"])
+        if not fasta.exists():
+            raise FileNotFoundError(f"Missing FASTA for {ref_name}: {fasta}")
+        if not gff.exists():
+            raise FileNotFoundError(f"Missing GFF for {ref_name}: {gff}")
+        index_prefix = resolve_reference_file(ref_dir, ref.get("index_prefix", fasta.stem))
+        build_bowtie2_index_if_needed(fasta, index_prefix, threads)
+
+        ref_dir_out = mapping_dir / ref_name
+        ref_dir_out.mkdir(parents=True, exist_ok=True)
+        input_reads = count_fastq_reads(current_fastq)
+        sam_out = ref_dir_out / f"{sample}.{ref_name}.sam"
+        bowtie_log = ref_dir_out / f"{sample}.{ref_name}.bowtie2.log"
+        fc_txt = ref_dir_out / f"{sample}.{ref_name}.featureCounts.txt"
+        fc_log = ref_dir_out / f"{sample}.{ref_name}.featureCounts.log"
+        fc_summary = Path(str(fc_txt) + ".summary")
+        gene_csv = ref_dir_out / f"{sample}.{ref_name}.gene_counts.csv"
+        summary_csv = ref_dir_out / f"{sample}.{ref_name}.featureCounts_summary.csv"
+        unmapped_suffix = ".unmapped.fastq.gz" if gzip_output else ".unmapped.fastq"
+        next_fastq = ref_dir_out / f"{sample}.not_{ref_name}{unmapped_suffix}"
+
+        map_fastq_to_reference(current_fastq, index_prefix, sam_out, bowtie_log, threads, mode, extra_args, overwrite)
+        run_featurecounts_reference(sam_out, gff, fc_txt, fc_log, fc_threads, stranded, ref.get("feature_type", fc_cfg.get("feature_type", "gene")), ref.get("gene_attribute", fc_cfg.get("gene_attribute", "Name")), allow_multi_overlap, overwrite)
+        gene_df = parse_gene_mapping_counts(fc_txt, sample, ref_name, input_reads)
+        gene_df.to_csv(gene_csv, index=False)
+        all_gene_dfs.append(gene_df)
+        summary_df = parse_featurecounts_summary(fc_summary, sample, ref_name, input_reads)
+        if not summary_df.empty:
+            summary_df.to_csv(summary_csv, index=False)
+            all_summary_dfs.append(summary_df)
+
+        if next_fastq.exists() and not overwrite:
+            extract_stats = summarize_pao1_sam(sam_out)
+            output_reads = count_fastq_reads(next_fastq)
+        else:
+            extract_stats = sam_unmapped_to_fastq(sam_out, next_fastq, gzip_output)
+            output_reads = int(extract_stats.get("leftover_fastq_reads") or 0)
+        mapped_reads = int(extract_stats.get("pao1_mapped_reads") or 0)
+        stats[f"{ref_name}_reference_input_reads"] = input_reads
+        stats[f"{ref_name}_reference_mapped_reads"] = mapped_reads
+        stats[f"{ref_name}_reference_unmatched_reads"] = output_reads
+        stats[f"{ref_name}_reference_gene_counts_csv"] = str(gene_csv)
+        sankey_steps.append({"name": ref_name, "input": input_reads, "matched": mapped_reads, "unmatched": output_reads})
+        manifest_rows.append({"sample": sample, "reference": ref_name, "input_fastq": str(current_fastq), "output_unmatched_fastq": str(next_fastq), "fasta": str(fasta), "gff": str(gff), "index_prefix": str(index_prefix), "sam": str(sam_out) if keep_sam else "", "gene_counts_csv": str(gene_csv), "featurecounts_summary_csv": str(summary_csv) if not summary_df.empty else "", "status": "done"})
+        if not keep_sam:
+            sam_out.unlink(missing_ok=True)
+        current_fastq = next_fastq
+
+    pd.DataFrame(manifest_rows).to_csv(mapping_dir / f"{sample}.reference_gene_mapping_manifest.csv", index=False)
+    if all_gene_dfs:
+        pd.concat(all_gene_dfs, ignore_index=True).to_csv(mapping_dir / f"{sample}.combined_gene_counts.csv", index=False)
+    if all_summary_dfs:
+        pd.concat(all_summary_dfs, ignore_index=True).to_csv(mapping_dir / f"{sample}.combined_featureCounts_summary.csv", index=False)
+    stats["reference_gene_mapping_leftover_fastq"] = str(current_fastq)
+    stats["reference_gene_mapping_leftover_reads"] = count_fastq_reads(current_fastq)
+    return current_fastq, stats, sankey_steps, manifest_rows
+
 def sourmash_param_string(ksize, scaled, abundance):
     return f"k={ksize},scaled={scaled}" + (",abund" if abundance else "")
 
@@ -292,9 +451,14 @@ def process_one_sample(decoy_sam, config, fasta, gff, index_prefix):
     stats.update(extract_stats)
     stats.update({"pao1_sam": str(pao1_sam), "leftover_fastq": str(output_fastq), "status": "done"})
 
-    remaining = int(stats.get("leftover_fastq_reads") or 0)
+    sourmash_fastq, gene_stats, gene_sankey_steps, _ = run_reference_gene_mapping(sample, output_fastq, config, sample_dir, overwrite)
+    stats.update(gene_stats)
+
+    remaining = count_fastq_reads(sourmash_fastq)
+    stats["sourmash_input_fastq"] = str(sourmash_fastq)
+    stats["sourmash_input_reads"] = remaining
     for db_cfg in config.get("sourmash", {}).get("databases", []):
-        sm = run_sourmash_for_sample(output_fastq, db_cfg, overwrite)
+        sm = run_sourmash_for_sample(sourmash_fastq, db_cfg, overwrite)
         est = int(round(remaining * sm["sourmash_matched_fraction"]))
         stats[f"{sm['database']}_sourmash_estimated_matched_reads"] = est
         stats[f"{sm['database']}_sourmash_unmatched_reads"] = max(0, remaining - est)
@@ -311,6 +475,11 @@ def process_one_sample(decoy_sam, config, fasta, gff, index_prefix):
         ("not decoy", "not PAO1", not_pao1),
     ]
     previous = "not PAO1"
+    for step in gene_sankey_steps:
+        name = step["name"]
+        links.append((previous, f"matched {name}", int(step["matched"])))
+        links.append((previous, f"not {name}", int(step["unmatched"])))
+        previous = f"not {name}"
     for db_cfg in config.get("sourmash", {}).get("databases", []):
         name = db_cfg["name"]
         matched = int(stats.get(f"{name}_sourmash_estimated_matched_reads", 0) or 0)
