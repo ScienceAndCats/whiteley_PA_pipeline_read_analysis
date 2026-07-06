@@ -9,6 +9,47 @@ pao1:
   fasta_extensions: ["Pseudomonas_aeruginosa_PAO1_107.fna", "*.fa", "*.fasta", "*.fna"]
   gff_extensions: ["Pseudomonas_aeruginosa_PAO1_107.gff3", "*.gff", "*.gff3"]
 
+
+gene_mapping:
+  # Map reads left over after decoy and PAO1 filtering to user-specified
+  # reference FASTA/GFF pairs before sourmash. Sourmash receives only the reads
+  # that remain unmapped after these references are applied in order.
+  enabled: true
+  references:
+    - name: mouse_GRCm39
+      reference_dir: /storage/home/hcoda1/2/hwilms3/r-mwhiteley3-0/refs
+      fasta: GCF_000001635.27_GRCm39_genomic.fna
+      gff: GCF_000001635.27_GRCm39_genomic.gff
+      index_prefix: GCF_000001635.27_GRCm39_genomic
+      feature_type: gene
+      gene_attribute: Name
+    - name: human_GRCh38
+      reference_dir: /storage/home/hcoda1/2/hwilms3/r-mwhiteley3-0/refs
+      fasta: human_GRCh38.fna
+      gff: human_GRCh38.gff
+      index_prefix: human_GRCh38
+      feature_type: gene
+      gene_attribute: Name
+    - name: rat_GRCr8
+      reference_dir: /storage/home/hcoda1/2/hwilms3/r-mwhiteley3-0/refs
+      fasta: GCA_036323735.1_GRCr8_rat_genomic.fna
+      gff: GCF_036323735.1_GRCr8_genomic.gff
+      index_prefix: GCA_036323735.1_GRCr8_rat_genomic
+      feature_type: gene
+      gene_attribute: Name
+  bowtie2:
+    threads: 16
+    mode: --end-to-end
+    extra_args:
+      - --very-sensitive
+  featurecounts:
+    threads: 16
+    stranded: 0
+    allow_multi_overlap: false
+  settings:
+    keep_sam: true
+    gzip_output: true
+
 sourmash:
   # Each database is run in order; the Sankey continues from the reads not
   # estimated to match the previous database.
