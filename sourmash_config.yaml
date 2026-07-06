@@ -1,0 +1,13 @@
+input_report_dir: /storage/home/hcoda1/2/hwilms3/scratch/MW153/outputs_MW153_array/other_bugs_PAO1_report
+fastq_pattern: '*.decoy_filtered.PAO1_unmapped.fastq.gz'
+sourmash:
+  database: /storage/home/hcoda1/2/hwilms3/scratch/reference_databases/sourmash/ncbi-euks-vertebrates-2025.01.dna.k=51.sig.zip
+  ksize: 51
+  scaled: 1000
+  abundance: true
+settings:
+  overwrite_existing: false
+  combine_gather_csvs: true
+  combined_output_csv: sourmash_gather_combined.csv
+  max_parallel_samples: 4
+  continue_on_error: false

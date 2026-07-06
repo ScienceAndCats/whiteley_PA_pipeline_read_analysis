@@ -1,0 +1,7 @@
+manifest_csv: /storage/home/hcoda1/2/hwilms3/scratch/MW153/outputs_MW153_array/other_bugs_PAO1_report/sample_manifest.csv
+
+settings:
+  output_filename_suffix: ".decoy_filtered.PAO1_unmapped.fastq.gz"
+  summary_filename: "non_decoy_non_PAO1_fastq_summary.csv"
+  overwrite_existing: false
+  gzip_output: true
