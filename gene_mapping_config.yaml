@@ -7,9 +7,9 @@ output_dir: "/storage/home/hcoda1/2/hwilms3/scratch/MW153/outputs_MW153_array/no
 references:
   - name: mouse_GRCm39
     reference_dir: "/storage/home/hcoda1/2/hwilms3/r-mwhiteley3-0/refs"
-    fasta: "GCF_000001635.27_GRCm39_genomic.fna"
-    gff: "GCF_000001635.27_GRCm39_genomic.gff"
-    index_prefix: "GCF_000001635.27_GRCm39_genomic"
+    fasta: "mouse_GCF_000001635.27_GRCm39_genomic.fna"
+    gff: "mouse_GCF_000001635.27_GRCm39_genomic.gff"
+    index_prefix: "mouse_GCF_000001635.27_GRCm39_genomic"
     feature_type: "gene"
     gene_attribute: "Name"
 
@@ -23,9 +23,9 @@ references:
 
   - name: rat_GRCr8
     reference_dir: "/storage/home/hcoda1/2/hwilms3/r-mwhiteley3-0/refs"
-    fasta: "GCA_036323735.1_GRCr8_rat_genomic.fna"
-    gff: "GCF_036323735.1_GRCr8_genomic.gff"
-    index_prefix: "GCA_036323735.1_GRCr8_rat_genomic"
+    fasta: "rat_GCF_036323735.1_GRCr8_genomic.fna"
+    gff: "rat_GCF_036323735.1_GRCr8_genomic.gff"
+    index_prefix: "rat_GCF_036323735.1_GRCr8_genomic"
     feature_type: "gene"
     gene_attribute: "Name"
 
