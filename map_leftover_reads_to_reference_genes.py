@@ -61,6 +61,59 @@ def sample_name_from_fastq(fastq_path):
     return Path(fastq_path).stem
 
 
+def find_sample_ref_match_csv(config):
+    configured = (
+        config.get("sample_ref_match_csv")
+        or config.get("sample_reference_match_csv")
+        or config.get("input", {}).get("sample_ref_match_csv")
+        or config.get("input", {}).get("sample_reference_match_csv")
+    )
+
+    if configured:
+        return Path(configured).expanduser()
+
+    default_path = Path("sample_ref_match.csv")
+    return default_path if default_path.exists() else None
+
+
+def load_sample_reference_matches(match_csv):
+    """Load sample-to-reference assignments from a two-column CSV file."""
+    matches = {}
+    df = pd.read_csv(match_csv, header=None, comment="#", names=["sample", "reference"])
+
+    for _, row in df.dropna(how="all").iterrows():
+        sample_value = str(row["sample"]).strip()
+        reference = str(row["reference"]).strip()
+
+        if not sample_value or not reference:
+            continue
+
+        sample_path = Path(sample_value)
+        sample_keys = {
+            sample_value,
+            str(sample_path.expanduser()),
+            sample_path.name,
+            sample_name_from_fastq(sample_path),
+        }
+
+        for key in sample_keys:
+            matches[key] = reference
+
+    return matches
+
+
+def reference_for_sample(fastq, sample, matches):
+    if not matches:
+        return None
+
+    fastq = Path(fastq)
+    for key in [str(fastq), str(fastq.expanduser()), fastq.name, sample]:
+        if key in matches:
+            return matches[key]
+
+    return None
+
+
 def open_maybe_gz(path):
     path = str(path)
     if path.endswith(".gz"):
@@ -276,6 +329,32 @@ def main():
     if not fastqs:
         raise FileNotFoundError(f"No FASTQ files found with glob: {fastq_glob}")
 
+    reference_by_name = {ref["name"]: ref for ref in config["references"]}
+    match_csv = find_sample_ref_match_csv(config)
+    sample_reference_matches = {}
+    if match_csv:
+        if not match_csv.exists():
+            raise FileNotFoundError(f"sample_ref_match CSV not found: {match_csv}")
+        sample_reference_matches = load_sample_reference_matches(match_csv)
+        unknown_refs = sorted(set(sample_reference_matches.values()) - set(reference_by_name))
+        if unknown_refs:
+            raise ValueError(
+                "sample_ref_match CSV contains references not defined in config: "
+                + ", ".join(unknown_refs)
+            )
+        unmatched_fastqs = [
+            str(fastq) for fastq in fastqs
+            if reference_for_sample(fastq, sample_name_from_fastq(fastq), sample_reference_matches) is None
+        ]
+        if unmatched_fastqs:
+            raise ValueError(
+                "No sample_ref_match assignment found for FASTQ(s): "
+                + ", ".join(unmatched_fastqs)
+            )
+        print(f"Loaded sample/reference assignments from: {match_csv}")
+    else:
+        print("No sample_ref_match CSV configured/found; all FASTQs will be mapped to all references.")
+
     bowtie_cfg = config.get("bowtie2", {})
     bowtie_threads = bowtie_cfg.get("threads", 16)
     bowtie_mode = bowtie_cfg.get("mode", "--end-to-end")
@@ -297,8 +376,18 @@ def main():
     all_summary_csvs = []
     manifest_rows = []
 
-    for ref in config["references"]:
+    for ref_name, ref in reference_by_name.items():
         ref_name = ref["name"]
+        ref_fastqs = [
+            fastq for fastq in fastqs
+            if not sample_reference_matches
+            or reference_for_sample(fastq, sample_name_from_fastq(fastq), sample_reference_matches) == ref_name
+        ]
+
+        if not ref_fastqs:
+            print(f"No FASTQs assigned to reference {ref_name}; skipping.")
+            continue
+
         ref_dir = Path(ref["reference_dir"]).expanduser()
 
         fasta = resolve_reference_file(ref_dir, ref["fasta"])
@@ -329,7 +418,7 @@ def main():
             threads=bowtie_threads
         )
 
-        for fastq in fastqs:
+        for fastq in ref_fastqs:
             sample = sample_name_from_fastq(fastq)
 
             sample_ref_dir = output_dir / ref_name / sample

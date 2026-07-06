@@ -12,9 +12,10 @@ pao1:
 
 gene_mapping:
   # Map reads left over after decoy and PAO1 filtering to user-specified
-  # reference FASTA/GFF pairs before sourmash. Sourmash receives only the reads
-  # that remain unmapped after these references are applied in order.
+  # reference FASTA/GFF pairs before sourmash. Each sample is mapped only to
+  # the reference assigned in sample_ref_match.csv.
   enabled: true
+  sample_ref_match_csv: sample_ref_match.csv
   references:
     - name: mouse_GRCm39
       reference_dir: /storage/home/hcoda1/2/hwilms3/r-mwhiteley3-0/refs
