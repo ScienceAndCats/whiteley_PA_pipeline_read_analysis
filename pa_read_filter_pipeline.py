@@ -8,6 +8,7 @@ outputs plus a combined read-count report and Sankey diagrams.
 
 import argparse
 import gzip
+import re
 import shutil
 import subprocess
 import sys
@@ -173,6 +174,70 @@ def resolve_reference_file(reference_dir, filename):
     return path if path.is_absolute() else Path(reference_dir).expanduser() / filename
 
 
+def sample_match_keys(sample_or_path):
+    path = Path(sample_or_path)
+    raw_values = {
+        str(sample_or_path),
+        str(path.expanduser()),
+        path.name,
+        sample_name_from_fastq(path),
+    }
+    keys = set()
+
+    for value in raw_values:
+        if not value:
+            continue
+
+        keys.add(value)
+        normalized = re.sub(r"_\d+bp$", "", value)
+        keys.add(normalized)
+
+    return keys
+
+
+def find_sample_ref_match_csv(config, gene_cfg):
+    configured = (
+        gene_cfg.get("sample_ref_match_csv")
+        or gene_cfg.get("sample_reference_match_csv")
+        or config.get("sample_ref_match_csv")
+        or config.get("sample_reference_match_csv")
+    )
+
+    if configured:
+        return Path(configured).expanduser()
+
+    default_path = Path("sample_ref_match.csv")
+    return default_path if default_path.exists() else None
+
+
+def load_sample_reference_matches(match_csv):
+    matches = {}
+    df = pd.read_csv(match_csv, header=None, comment="#", names=["sample", "reference"])
+
+    for _, row in df.dropna(how="all").iterrows():
+        sample_value = str(row["sample"]).strip()
+        reference = str(row["reference"]).strip()
+
+        if not sample_value or not reference:
+            continue
+
+        for key in sample_match_keys(sample_value):
+            matches[key] = reference
+
+    return matches
+
+
+def reference_for_sample(sample, fastq, matches):
+    if not matches:
+        return None
+
+    for key in sample_match_keys(sample) | sample_match_keys(fastq):
+        if key in matches:
+            return matches[key]
+
+    return None
+
+
 def bowtie2_index_exists(index_prefix):
     index_prefix = str(index_prefix)
     small = [".1.bt2", ".2.bt2", ".3.bt2", ".4.bt2", ".rev.1.bt2", ".rev.2.bt2"]
@@ -243,6 +308,24 @@ def run_reference_gene_mapping(sample, input_fastq, config, sample_dir, overwrit
     references = gene_cfg.get("references", [])
     if not references:
         return input_fastq, {}, [], []
+    reference_by_name = {ref["name"]: ref for ref in references}
+    match_csv = find_sample_ref_match_csv(config, gene_cfg)
+    if match_csv:
+        if not match_csv.exists():
+            raise FileNotFoundError(f"sample_ref_match CSV not found: {match_csv}")
+        sample_reference_matches = load_sample_reference_matches(match_csv)
+        unknown_refs = sorted(set(sample_reference_matches.values()) - set(reference_by_name))
+        if unknown_refs:
+            raise ValueError(
+                "sample_ref_match CSV contains references not defined in gene_mapping.references: "
+                + ", ".join(unknown_refs)
+            )
+        assigned_reference = reference_for_sample(sample, input_fastq, sample_reference_matches)
+        if assigned_reference is None:
+            raise ValueError(f"No sample_ref_match assignment found for sample {sample} ({input_fastq})")
+        references = [reference_by_name[assigned_reference]]
+    else:
+        print("No sample_ref_match CSV configured/found; sample will be mapped to all gene_mapping references.")
 
     bowtie_cfg = gene_cfg.get("bowtie2", {})
     fc_cfg = gene_cfg.get("featurecounts", {})
