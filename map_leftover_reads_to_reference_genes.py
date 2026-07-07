@@ -62,27 +62,6 @@ def sample_name_from_fastq(fastq_path):
     return Path(fastq_path).stem
 
 
-def sample_match_keys(sample_or_path):
-    path = Path(sample_or_path)
-    raw_values = {
-        str(sample_or_path),
-        str(path.expanduser()),
-        path.name,
-        sample_name_from_fastq(path),
-    }
-    keys = set()
-
-    for value in raw_values:
-        if not value:
-            continue
-
-        keys.add(value)
-        normalized = re.sub(r"_\d+bp$", "", value)
-        keys.add(normalized)
-
-    return keys
-
-
 def find_sample_ref_match_csv(config):
     configured = (
         config.get("sample_ref_match_csv")
@@ -110,7 +89,15 @@ def load_sample_reference_matches(match_csv):
         if not sample_value or not reference:
             continue
 
-        for key in sample_match_keys(sample_value):
+        sample_path = Path(sample_value)
+        sample_keys = {
+            sample_value,
+            str(sample_path.expanduser()),
+            sample_path.name,
+            sample_name_from_fastq(sample_path),
+        }
+
+        for key in sample_keys:
             matches[key] = reference
 
     return matches
@@ -120,7 +107,8 @@ def reference_for_sample(fastq, sample, matches):
     if not matches:
         return None
 
-    for key in sample_match_keys(fastq) | sample_match_keys(sample):
+    fastq = Path(fastq)
+    for key in [str(fastq), str(fastq.expanduser()), fastq.name, sample]:
         if key in matches:
             return matches[key]
 
